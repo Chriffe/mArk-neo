@@ -1,4 +1,4 @@
-# Daily Scroll — CrowPanel Advanced 10.1" (ESP32-P4)
+# mArk Dispaly — CrowPanel Advanced 10.1" (ESP32-P4)
 
 A daily task viewer that pulls events from Google Calendar and ICS feeds,
 displayed on an Elecrow CrowPanel Advanced 10.1" screen with rotary encoder
