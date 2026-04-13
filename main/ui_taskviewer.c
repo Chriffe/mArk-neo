@@ -104,7 +104,7 @@ static inline lv_color_t th_track(void)   { return ui_dark_mode ? C_DARK_TRACK :
 
 /* ── Multi-calendar source list (type defined in calendar_fetch.h) ── */
 cal_source_t cal_sources[MAX_CAL_SOURCES] = {
-    { .type = 0, .name = "Google Calendar", .url = "theswedishmaker@gmail.com", .enabled = true },
+    { .type = 0, .name = "Google Calendar", .url = "", .enabled = true },
 };
 int cal_source_count = 1;
 
