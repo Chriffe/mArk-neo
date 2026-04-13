@@ -108,7 +108,7 @@ Then open `main/secrets.h` and edit the three lines:
 Connect the CrowPanel to your computer via USB, then:
 
 ```bash
-cd esp32-project
+cd [projectfolder] (replace with the folder your project is in) 
 
 # Set the target chip (only needed once per project)
 idf.py set-target esp32p4
