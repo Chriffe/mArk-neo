@@ -65,6 +65,10 @@ static char       s_completed_date[MAX_USERS][9];  /* YYYYMMDD the keys were sav
 /* When set, the next calendar_fetch() skips the internal save (used on user switch) */
 static bool s_suppress_completion_save = false;
 
+/* Snapshot of active_user taken at the start of calendar_fetch() — prevents
+ * a concurrent user switch from corrupting completion state mid-fetch */
+static int s_fetch_user = 0;
+
 /* ── Local task persistence across refreshes ── */
 static cal_task_t s_local_tasks[MAX_TASKS];
 static int s_local_task_count = 0;
@@ -153,7 +157,7 @@ static void save_local_tasks(void) {
 }
 
 static void save_completion_state(void) {
-    int u = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
+    int u = s_fetch_user;
     s_completed_count[u] = 0;
 
     /* Tag the saved state with today's date (adjusted for day offset) */
@@ -179,7 +183,7 @@ static void save_completion_state(void) {
 }
 
 static bool was_completed(const cal_task_t *task) {
-    int u = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
+    int u = s_fetch_user;
     if (s_completed_count[u] == 0) return false;
 
     /* Reject keys saved for a different day — prevents yesterday's completions
@@ -206,6 +210,7 @@ static bool was_completed(const cal_task_t *task) {
 
 /* Public: save the current user's completion state (call before switching active_user) */
 void calendar_save_completion_state(void) {
+    s_fetch_user = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
     save_completion_state();
 }
 
@@ -739,6 +744,10 @@ static int task_time_cmp(const void *a, const void *b) {
 }
 
 bool calendar_fetch(void) {
+    /* Snapshot active_user once — prevents a concurrent user switch from
+     * corrupting save_completion_state() / was_completed() mid-fetch */
+    s_fetch_user = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
+
     save_local_tasks();
     if (!s_suppress_completion_save) {
         save_completion_state();
@@ -781,7 +790,7 @@ bool calendar_fetch(void) {
         char date8[9];
         snprintf(date8, sizeof(date8), "%04d%02d%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
         cal_task_t manual[MANUAL_TASK_MAX];
-        int mc = manual_tasks_load_user(active_user, date8, manual, MANUAL_TASK_MAX);
+        int mc = manual_tasks_load_user(s_fetch_user, date8, manual, MANUAL_TASK_MAX);
         for (int i = 0; i < mc && s_stage_count < MAX_TASKS; i++) {
             manual[i].completed = was_completed(&manual[i]);
             s_stage[s_stage_count] = manual[i];
