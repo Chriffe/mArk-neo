@@ -134,6 +134,7 @@ static lv_obj_t *dots_container;
 static lv_obj_t *s_mp = NULL;
 static lv_obj_t *lbl_clock = NULL;
 static lv_obj_t *lbl_dark_btn = NULL;
+static lv_obj_t *btn_refresh_obj = NULL;
 static lv_obj_t *complete_screen = NULL;
 static lv_obj_t *leaderboard_overlay = NULL;
 static lv_obj_t *sleep_overlay = NULL;
@@ -1158,6 +1159,10 @@ static void show_settings(void) {
 
 static void cb_refresh(lv_event_t *e) {
     (void)e;
+    /* Flash button to accent color to acknowledge the tap */
+    if (btn_refresh_obj) {
+        lv_obj_set_style_bg_color(btn_refresh_obj, C_ACCENT, 0);
+    }
     /* Request async refresh — the calendar_refresh_task handles the network
      * fetch without holding the LVGL lock, preventing UI freeze. */
     calendar_request_refresh();
@@ -1751,18 +1756,18 @@ void ui_build(void) {
 
     /* ── Bottom toolbar (anchored to bottom of sidebar) ── */
     /* Refresh button — plain obj, no theme, no transitions */
-    lv_obj_t *btn_refresh = lv_obj_create(sb);
-    lv_obj_remove_style_all(btn_refresh);
-    lv_obj_add_flag(btn_refresh, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(btn_refresh, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(btn_refresh, SIDEBAR_W - BEZEL_LEFT - 48, 44);
-    lv_obj_set_pos(btn_refresh, 24, PANEL_H - 112);
-    lv_obj_set_style_bg_color(btn_refresh, th_card(), 0);
-    lv_obj_set_style_bg_opa(btn_refresh, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(btn_refresh, 12, 0);
-    lv_obj_add_event_cb(btn_refresh, cb_refresh, LV_EVENT_CLICKED, NULL);
+    btn_refresh_obj = lv_obj_create(sb);
+    lv_obj_remove_style_all(btn_refresh_obj);
+    lv_obj_add_flag(btn_refresh_obj, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(btn_refresh_obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(btn_refresh_obj, SIDEBAR_W - BEZEL_LEFT - 48, 44);
+    lv_obj_set_pos(btn_refresh_obj, 24, PANEL_H - 112);
+    lv_obj_set_style_bg_color(btn_refresh_obj, th_card(), 0);
+    lv_obj_set_style_bg_opa(btn_refresh_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(btn_refresh_obj, 12, 0);
+    lv_obj_add_event_cb(btn_refresh_obj, cb_refresh, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *rl = lv_label_create(btn_refresh);
+    lv_obj_t *rl = lv_label_create(btn_refresh_obj);
     lv_label_set_text(rl, LV_SYMBOL_REFRESH "  REFRESH");
     lv_obj_set_style_text_color(rl, th_fg(), 0);
     lv_obj_set_style_text_font(rl, icon_font_sm(), 0);
@@ -1986,6 +1991,10 @@ void ui_refresh_all(void) {
     refresh_sidebar();
     user_bar_refresh();
     ui_refresh_clock();
+    /* Restore refresh button color — fetch is done */
+    if (btn_refresh_obj) {
+        lv_obj_set_style_bg_color(btn_refresh_obj, th_card(), 0);
+    }
     if (!ui_leds_suppressed && !display_sleeping) {
         ws2812_update_progress(ui_completed, cal_task_count);
     }
