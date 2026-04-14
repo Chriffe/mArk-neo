@@ -1,321 +1,287 @@
-# mArk Dispaly — CrowPanel Advanced 10.1" (ESP32-P4)
+# mArk — Family Task Display
 
-A daily task viewer that pulls events from Google Calendar and ICS feeds,
-displayed on an Elecrow CrowPanel Advanced 10.1" screen with rotary encoder
-navigation and WS2812 LED progress bar. Supports up to 6 family members, each
-with their own calendars and completion streaks.
+mArk is a always-on home display that turns your family's daily calendar into something you can all see, track, and compete over. Each family member gets their own task list pulled live from their calendar. As tasks get marked done, a LED strip fills up. Finish everything and the screen celebrates. Do it again tomorrow and your streak grows. Miss a day and it resets — keeping the competition real.
 
----
+Built on a 10" touchscreen, mArk lives on the kitchen counter or wherever the family gathers. No app to open, no notifications to dismiss. It's just there.
 
-## Quick Overview
-
-- Tap tasks on screen to mark them done
-- LEDs fill up as you complete tasks
-- Switch users via the left sidebar
-- Add/edit calendar sources from any phone browser via the built-in web UI
-- Refreshes every 5 minutes automatically
+- Up to 6 family members, each with their own tasks and streak counter
+- Tasks pulled automatically from Google Calendar or Apple Calendar
+- LED strip shows how much of the day is done
+- Streak system with levels (Starter → Consistent → Dedicated → Unstoppable → Legend → Titan)
+- Rotary encoder for scrolling through tasks without touching the screen
+- Web interface for managing calendars from any phone — no computer needed
+- Soft power button: short press to sleep/wake, hold 3 seconds for deep sleep
 
 ---
 
-## New User Setup — Step by Step
+## What You Need
 
-### Step 1: Install ESP-IDF
+### Hardware
 
-The project requires **ESP-IDF v5.4.2**.
+| Part | Details |
+|---|---|
+| Display | Elecrow CrowPanel Advanced 10.1" (ESP32-P4) |
+| LED strip | WS2812 addressable LEDs (32 LEDs recommended) |
+| Rotary encoder | Any standard KY-040 style encoder with push button |
+| Power button | Any momentary push button |
 
-Follow the official installation guide for your OS:
+The CrowPanel has WiFi, touch, and the main processor all built in. You just need to wire up the LEDs, encoder, and power button.
+
+See `COMPONENTS.md` for exact parts with purchase links.
+
+### Wiring
+
+| Part | Signal | Connect to |
+|---|---|---|
+| LED strip | DIN (data) | IO2 |
+| LED strip | VCC | 5V |
+| LED strip | GND | GND |
+| Power button | One leg | IO3 |
+| Power button | Other leg | GND |
+| Rotary encoder | CLK | IO27 |
+| Rotary encoder | DT | IO28 |
+| Rotary encoder | SW (push) | IO5 |
+| Rotary encoder | VCC | 3.3V |
+| Rotary encoder | GND | GND |
+
+---
+
+## Setup Guide
+
+### Step 1: Install the build tools
+
+mArk runs on ESP-IDF, the official development framework for the ESP32 chip. Think of it as the compiler and flasher that turns the code into something the display can run.
+
+**Install ESP-IDF v5.4.2** by following the guide for your operating system:
 https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/get-started/
 
-After installation, verify it works:
+The guide walks you through the full installation. Once done, open a new terminal and verify it worked:
 
 ```bash
 idf.py --version
 # Should print: ESP-IDF v5.4.2
 ```
 
-Make sure `IDF_PATH` is set and the `idf.py` command is available in your
-terminal before continuing.
+If that command is not found, the installer did not finish correctly — re-run it and follow the step that says to run `export.sh` (Mac/Linux) or `export.bat` (Windows) to activate the environment.
 
 ---
 
-### Step 2: Get the Elecrow BSP (Board Support Package)
+### Step 2: Get the display drivers
 
-The display and touch drivers are not included in this repo — they come from
-Elecrow's official example code.
+The code that makes the screen actually work is provided separately by Elecrow (the company that makes the display). You need to copy it into this project.
 
 ```bash
-# Clone Elecrow's example repo (you only need to do this once)
+# Download Elecrow's example code (you only need to do this once)
 git clone https://github.com/Elecrow-RD/CrowPanel-Advanced-10.1inch-ESP32-P4-HMI-AI-Display-1024x600-IPS-Touch-Screen.git elecrow-examples
 
-# Copy the peripheral folder into this project
+# Copy the drivers into this project
 cp -r elecrow-examples/example/V1.0/idf-code/Lesson09-LVGL_Lighting_Control/peripheral esp32-project/
 ```
 
-The `peripheral/` folder contains:
-- `bsp_display/` — MIPI-DSI display driver and LVGL port
-- `bsp_illuminate/` — Backlight control
-- `bsp_i2c/` — I2C bus (used by touch controller)
-- `bsp_extra/` — GT911 touch panel driver
+> **Important:** Use Lesson 09 specifically. Other lessons won't work.
 
-If the screen shows white/blank after flashing, this folder is either missing
-or from the wrong Elecrow lesson. Lesson 09 is the correct one.
+If you see a white or blank screen after flashing, this step was missed or the wrong lesson was used.
 
 ---
 
-### Step 3: Get a Google Calendar API Key
+### Step 3: Connect your calendar
 
-If you want to fetch **public** Google Calendars using their Calendar ID:
+mArk shows tasks that come from your calendar. There are two ways to connect it — you only need one, but you can use both.
+
+#### Option A: ICS link (works with any calendar — recommended for most people)
+
+Every major calendar app can generate a private link that mArk can read directly. This works with Google Calendar, Apple Calendar, Outlook, and most others. You don't need any API key.
+
+**Google Calendar:**
+1. Open Google Calendar on your computer
+2. Click the three dots next to the calendar you want → **Settings and sharing**
+3. Scroll down to **Secret address in iCal format**
+4. Copy that URL — you'll paste it into mArk's web interface later (Step 7)
+
+**Apple Calendar (iCloud):**
+1. On Mac: open Calendar → right-click the calendar → **Share Calendar** → copy the link
+2. On iPhone: Settings → your name → iCloud → make sure Calendars is turned on, then use the Mac steps above
+
+#### Option B: Google API key (only needed for public Google Calendars)
+
+If the calendar you want to use is set to **public** in Google Calendar, you can use this method instead. If you're not sure, use Option A — it always works regardless of privacy settings.
 
 1. Go to https://console.cloud.google.com
-2. Create a new project (or use an existing one)
-3. Go to **APIs & Services → Library**
-4. Search for **Google Calendar API** and click **Enable**
-5. Go to **APIs & Services → Credentials**
-6. Click **Create Credentials → API key**
-7. Copy the key — you will paste it in the next step
-
-> **Note:** The API key only works for calendars that are set to "public" in
-> Google Calendar settings. For private calendars, use the ICS/iCal URL
-> instead (see the web UI help text for instructions).
+2. Create a new project
+3. Go to **APIs & Services → Library**, search for **Google Calendar API**, click **Enable**
+4. Go to **APIs & Services → Credentials**, click **Create Credentials → API key**
+5. Copy the key — you'll need it in the next step
 
 ---
 
-### Step 4: Configure WiFi and API Key
+### Step 4: Enter your WiFi and API key
 
-Copy the example secrets file and fill in your credentials:
+Open the file `main/secrets.h.example`, make a copy of it called `main/secrets.h`, and fill in your details:
 
 ```bash
 cp main/secrets.h.example main/secrets.h
 ```
 
-Then open `main/secrets.h` and edit the three lines:
+Then open `main/secrets.h` in any text editor and fill in your values:
 
 ```c
 #define WIFI_SSID      "your_wifi_network_name"
 #define WIFI_PASSWORD  "your_wifi_password"
-#define GCAL_API_KEY   "your_google_api_key_from_step_3"
+#define GCAL_API_KEY   "your_google_api_key"   // leave blank if using Option A only
 ```
 
-`secrets.h` is listed in `.gitignore` and will never be committed.
+This file is never uploaded to GitHub — your passwords stay on your computer only.
 
-> The NTP server is set to `pool.ntp.org` by default — change it in
-> `main/calendar_fetch.c` if you need a different one.
+> **Time zone:** mArk automatically sets its clock from the internet when it connects to WiFi. It is currently set to Central European Time (CET/CEST). If you are in a different time zone, open `main/calendar_fetch.c` and find the line that says `"CET-1CEST,M3.5.0/2,M10.5.0/3"` — replace it with your own time zone string. A full list is available at https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
 
 ---
 
-### Step 5: Build and Flash
+### Step 5: Build and flash
 
-Connect the CrowPanel to your computer via USB, then:
+Connect the CrowPanel to your computer with a USB cable, then run:
 
 ```bash
-cd [projectfolder] (replace with the folder your project is in) 
+cd esp32-project
 
-# Set the target chip (only needed once per project)
+# First time only — tells the build system which chip you're using
 idf.py set-target esp32p4
 
-# Build the firmware
+# Compile the code
 idf.py build
 
-# Flash to the board (replace PORT with your actual port)
-# macOS: typically /dev/cu.wchusbserial10 or /dev/cu.usbserial-XXXX
-# Linux: typically /dev/ttyUSB0 or /dev/ttyACM0
+# Send it to the display (replace the port with yours — see below)
 idf.py -p /dev/cu.wchusbserial10 flash
-
-# Optional: open serial monitor to see logs
-idf.py -p /dev/cu.wchusbserial10 monitor
 ```
 
-To find your port:
-```bash
-# macOS
-ls /dev/cu.*
+**Finding your port:**
 
-# Linux
-ls /dev/ttyUSB* /dev/ttyACM*
-```
+On Mac, open Terminal and run `ls /dev/cu.*` — look for something with "usb" or "wch" in the name.
 
-The first build takes several minutes — subsequent builds are much faster.
+On Linux, run `ls /dev/ttyUSB* /dev/ttyACM*`.
 
-> **Shortcut:** `flash.sh` in the project root builds, flashes, and opens the
-> monitor in one command. Edit it if your port differs from `/dev/cu.wchusbserial10`.
+On Windows, open Device Manager and look under "Ports (COM & LPT)".
+
+The first build takes a few minutes. After that it's much faster.
+
+> **Shortcut:** the file `flash.sh` in the project folder does the build, flash, and log viewer all in one command. Edit it first if your USB port name is different.
 
 ---
 
-### Step 6: First Boot
+### Step 6: First boot
 
-After flashing, the board will reboot and:
+After flashing, the display restarts automatically and:
 
-1. Connect to your WiFi network
-2. Sync time via NTP
-3. Show a "Connecting..." screen while fetching calendar events
-4. Display today's tasks on the main screen
+1. Connects to your WiFi
+2. Sets its clock from the internet
+3. Shows "Connecting..." while it fetches your calendar
+4. Displays today's tasks
 
-The board's IP address is printed in the serial monitor on boot. The mDNS
-hostname `taskviewer.local` can also be used from devices on the same network.
-
----
-
-### Step 7: Add Calendars via Web UI
-
-Once the board is running and connected to WiFi, open a browser on any phone
-or computer on the same network and go to:
-
-```
-http://<board-ip-address>/
-```
-
-or
-
-```
-http://taskviewer.local/
-```
-
-From the web UI you can:
-
-- Add **Google Calendar** sources (requires the Calendar ID and API key from Step 3)
-- Add **ICS / iCal** sources (works with Google, Apple, Outlook, and any
-  standard ICS feed — best for private calendars)
-- Edit calendar names and toggle them on/off
-- Configure calendars separately for each user
-
-**How to get an ICS URL from Google Calendar:**
-1. Open Google Calendar on desktop
-2. Click the three dots next to the calendar → **Settings and sharing**
-3. Scroll down to **Secret address in iCal format** (for private) or
-   **Public address in iCal format** (for public)
-4. Copy the URL and paste it into the web UI
-
-**How to get an ICS URL from Apple Calendar (iCloud):**
-1. On iPhone: Settings → [your name] → iCloud → turn on Calendars
-2. On Mac: Calendar → right-click calendar → Share Calendar → copy the URL
+Once it's running, the display gets its own address on your home network. You'll use this address to manage calendars from your phone in the next step.
 
 ---
 
-### Step 8: Add More Users (optional)
+### Step 7: Add your calendar via the web interface
 
-The app supports up to 6 users (family members), each with their own calendars
-and completion streaks.
+Open any browser on your phone or computer (while on the same WiFi as mArk) and go to:
 
-To add a user:
-1. Tap **Settings** in the left sidebar on the device screen
+```
+http://mark.local/
+```
+
+If that doesn't work, look at the display's startup screen — it shows the IP address (something like `192.168.1.42`). Use that instead:
+
+```
+http://192.168.1.42/
+```
+
+From here you can add calendars for each family member. Paste in the ICS link from Step 3 (Option A) or enter your Google Calendar ID if you're using the API key (Option B).
+
+You can add up to 5 calendar sources per person, mix Google and ICS sources, and toggle individual calendars on or off.
+
+---
+
+### Step 8: Add family members
+
+mArk supports up to 6 people, each with their own task list, streak, and progress bar.
+
+To add someone:
+1. Tap **Settings** on the display
 2. Tap **Add user**
-3. Enter a name
-4. Then go to the web UI to add that user's calendar sources
+3. Type their name
+4. Go back to the web interface (Step 7) to add their calendar
 
-To switch users: tap the user icons in the left sidebar.
+To switch between people on the display: tap the person icons in the left sidebar.
 
 ---
 
-## Controls
+## How to use it
 
-| Control | Action |
+| Action | What it does |
 |---|---|
-| Touch task row | Toggle task done/undone |
-| Rotate encoder | Scroll through task list |
-| Press encoder button | Toggle current task done/undone |
-| Touch **Refresh** (sidebar) | Fetch latest calendar events |
-| Touch **Settings** (sidebar) | Open user management |
-| Touch user icons (sidebar) | Switch active user |
-| Power button short press | Toggle display + LEDs on/off |
-| Power button long press (3 s) | Deep sleep (press again to wake) |
+| Tap a task | Mark it done (tap again to undo) |
+| Rotate the knob | Scroll through tasks |
+| Press the knob | Mark current task done |
+| Tap **Refresh** | Fetch the latest tasks from your calendar right now |
+| Tap **Settings** | Manage users and calendars |
+| Tap a person icon | Switch to that person's task list |
+| Short press power button | Turn display and LEDs on/off |
+| Hold power button 3 seconds | Deep sleep mode (press again to wake) |
+
+Tasks refresh automatically every 5 minutes. The display also refreshes when you wake it up.
 
 ---
 
-## Hardware
+## Streaks and levels
 
-See `COMPONENTS.md` for a full bill of materials with quantities and notes.
+Every time someone completes all their tasks for the day, their streak goes up by one. Miss a day and it resets to 1. The streak counter is shown in the left sidebar.
 
-| Component | Details |
+| Level | Days needed |
 |---|---|
-| Display | CrowPanel Advanced 10.1" ESP32-P4 (1024×600, MIPI-DSI IPS) |
-| MCU | ESP32-P4 (dual-core RISC-V 400 MHz) |
-| WiFi | ESP32-C6 co-processor (WiFi 6 + BLE 5.3, built into CrowPanel) |
-| Touch | GT911 capacitive touch (built into CrowPanel) |
-| Input | Rotary encoder with push button |
-| LEDs | WS2812 LED strip (32 LEDs) |
-| Power | Momentary push button for soft power control |
+| Starter | 0 |
+| Consistent | 5 |
+| Dedicated | 15 |
+| Unstoppable | 30 |
+| Legend | 50 |
+| Titan | 100 |
 
 ---
 
-## Pin Assignment
+## Hardware details
 
-| Function | GPIO | Notes |
-|---|---|---|
-| WS2812 DATA | IO2 | LED strip data, 330Ω series resistor recommended |
-| Power button | IO3 | Momentary, active low with internal pull-up |
-| Encoder push | IO5 | Active low with internal pull-up |
-| Encoder A (CLK) | IO27 | Rotary encoder |
-| Encoder B (DT) | IO28 | Rotary encoder |
-| SPK-R | IO14 | I2S audio output (right channel) |
-| SPK-L | IO16 | I2S audio output (left channel) |
+### Pin assignment
 
-**WS2812 wiring:** DIN → IO2, VCC → 5V, GND → GND
+| Function | GPIO |
+|---|---|
+| LED strip data | IO2 |
+| Power button | IO3 |
+| Encoder push button | IO5 |
+| Encoder CLK | IO27 |
+| Encoder DT | IO28 |
+| Audio right | IO14 |
+| Audio left | IO16 |
 
-**Power button wiring:** one leg → IO3, other leg → GND
+### Full component list
 
-**Encoder wiring:** CLK → IO27, DT → IO28, SW → IO5, VCC → 3.3V, GND → GND
-
----
-
-## Project Structure
-
-```
-esp32-project/
-├── CMakeLists.txt              # ESP-IDF project root
-├── sdkconfig.defaults          # Default SDK configuration
-├── partitions.csv              # Flash partition table
-├── flash.sh                    # Shortcut: build + flash + monitor
-├── main/
-│   ├── idf_component.yml       # Component dependencies (LVGL 9.2, mDNS, etc.)
-│   ├── main.c                  # Entry point, init sequence, refresh task
-│   ├── calendar_fetch.c/h      # WiFi, NTP, Google Calendar API, ICS fetcher
-│   ├── ui_taskviewer.c/h       # LVGL UI — main screen, sidebar, settings
-│   ├── web_config.c/h          # HTTP config server (calendar management)
-│   ├── user_store.c/h          # NVS-backed multi-user profiles
-│   ├── streak_store.c/h        # NVS streak persistence per user
-│   ├── ws2812_led.c/h          # WS2812 LED strip (RMT driver)
-│   ├── led_strip_encoder.c/h   # RMT encoder for WS2812 protocol
-│   ├── power_button.c/h        # Soft power (short=toggle, long=deep sleep)
-│   ├── rotary_encoder.c/h      # Encoder scroll + button navigation
-│   ├── sound_driver.c/h        # I2S audio feedback
-│   └── lv_font_*.c             # Custom fonts (Swedish + UI glyphs)
-└── peripheral/                 # Elecrow BSP — copy from their repo (Step 2)
-    ├── bsp_display/            # MIPI-DSI display driver + LVGL port
-    ├── bsp_illuminate/         # Backlight control
-    ├── bsp_i2c/                # I2C bus driver
-    └── bsp_extra/              # GT911 touch driver
-```
+See `COMPONENTS.md`.
 
 ---
 
 ## Troubleshooting
 
 **White or blank screen after flashing**
-→ The `peripheral/` folder is missing or copied from the wrong Elecrow lesson.
-Use Lesson 09 from the CrowPanel Advanced 10.1" repo.
+→ The display drivers are missing. Go back to Step 2 and make sure you copied the `peripheral/` folder from Lesson 09 specifically.
 
-**Build error: `idf.py` not found or wrong version**
-→ Re-run the ESP-IDF installer and make sure to run the `export.sh` / `export.bat`
-script that activates the environment in your current terminal session.
+**"idf.py not found" error**
+→ The ESP-IDF environment is not active in your terminal. Close the terminal, open a new one, and run the `export.sh` (Mac/Linux) or `export.bat` (Windows) script from your ESP-IDF installation folder before trying again.
 
-**No WiFi connection**
-→ Double-check `WIFI_SSID` and `WIFI_PASSWORD` in `main/calendar_fetch.c`.
-The ESP32-P4 uses an ESP32-C6 co-processor for WiFi — both chips boot together
-and this is handled automatically, but make sure you flashed the correct port.
+**Display won't connect to WiFi**
+→ Double-check the network name and password in `main/secrets.h`. The network must be 2.4 GHz — the display does not support 5 GHz WiFi.
 
-**Calendar not showing events**
-→ Check that your Google Calendar is set to **public**, or use an ICS URL
-for private calendars. Verify the API key has Google Calendar API enabled in
-Google Cloud Console.
+**No tasks showing / "No events"**
+→ If using an ICS link: make sure you copied the full URL including `https://`. If using Google API: make sure the calendar is set to public and the API key has Google Calendar API enabled.
 
-**Touch not working**
-→ Run the Elecrow Lesson 05 (Touchscreen) example first to confirm the touch
-controller is functional on your board.
+**Web interface not loading**
+→ Your phone must be on the same WiFi network as the display. Try the IP address shown on the display instead of `mark.local`.
 
-**Web UI not reachable**
-→ Make sure your phone/computer is on the same WiFi network as the board.
-Try the IP address shown in the serial monitor instead of `taskviewer.local`.
-
-**LEDs stay on after display turned off**
-→ This should not happen in the current firmware. If it does, a hard reboot
-(unplug and replug) will reset the state.
+**Tasks from yesterday still showing in the morning**
+→ Tap **Refresh** to force an immediate update. If it keeps happening, make sure the display stays powered overnight so the automatic midnight refresh can run.
