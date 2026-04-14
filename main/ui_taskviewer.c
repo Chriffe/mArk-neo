@@ -243,6 +243,8 @@ static void cb_wake_display(lv_event_t *e) {
     if (!ui_leds_suppressed) {
         ws2812_update_progress(ui_completed, cal_task_count);
     }
+    /* Trigger a refresh on wake — catches midnight rollover if overnight fetch failed */
+    calendar_request_refresh();
 }
 
 static void cb_sleep_display(lv_event_t *e) {
@@ -1529,6 +1531,10 @@ static void cb_switch_user(lv_event_t *e) {
     if (!calendar_restore_cached_tasks(active_user)) {
         calendar_set_offline_placeholder();
     }
+    /* Sync s_completed_keys for new user from whatever cal_tasks[] now holds,
+     * so the background network fetch's was_completed() calls use correct state. */
+    calendar_save_completion_state();
+
     ui_completed = calendar_get_completed();
     ui_current = 0;
     ui_refresh_all();
@@ -2001,5 +2007,8 @@ void ui_set_display_sleeping(bool sleeping) {
     display_sleeping = sleeping;
     if (sleeping) {
         ws2812_off();
+    } else {
+        /* Trigger refresh on wake — catches midnight rollover if overnight fetch failed */
+        calendar_request_refresh();
     }
 }

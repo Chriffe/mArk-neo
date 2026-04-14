@@ -59,7 +59,8 @@ typedef struct {
 
 /* Per-user completion state: each user's completed task keys stored separately */
 static comp_key_t s_completed_keys[MAX_USERS][MAX_COMPLETED_KEYS];
-static int s_completed_count[MAX_USERS];
+static int        s_completed_count[MAX_USERS];
+static char       s_completed_date[MAX_USERS][9];  /* YYYYMMDD the keys were saved for */
 
 /* When set, the next calendar_fetch() skips the internal save (used on user switch) */
 static bool s_suppress_completion_save = false;
@@ -154,9 +155,18 @@ static void save_local_tasks(void) {
 static void save_completion_state(void) {
     int u = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
     s_completed_count[u] = 0;
+
+    /* Tag the saved state with today's date (adjusted for day offset) */
+    time_t now = time(NULL);
+    now += cal_day_offset * 86400;
+    struct tm td;
+    localtime_r(&now, &td);
+    snprintf(s_completed_date[u], sizeof(s_completed_date[u]), "%04d%02d%02d",
+             td.tm_year + 1900, td.tm_mon + 1, td.tm_mday);
+
     for (int i = 0; i < cal_task_count && s_completed_count[u] < MAX_COMPLETED_KEYS; i++) {
         if (!cal_tasks[i].completed) continue;
-        if (cal_tasks[i].id[0] != '\0' && s_completed_count[u] < MAX_COMPLETED_KEYS) {
+        if (cal_tasks[i].id[0] != '\0') {
             strncpy(s_completed_keys[u][s_completed_count[u]].key, cal_tasks[i].id, COMP_KEY_LEN - 1);
             s_completed_keys[u][s_completed_count[u]].key[COMP_KEY_LEN - 1] = '\0';
             s_completed_count[u]++;
@@ -170,6 +180,21 @@ static void save_completion_state(void) {
 
 static bool was_completed(const cal_task_t *task) {
     int u = (active_user >= 0 && active_user < MAX_USERS) ? active_user : 0;
+    if (s_completed_count[u] == 0) return false;
+
+    /* Reject keys saved for a different day — prevents yesterday's completions
+     * bleeding into today after midnight rollover */
+    time_t now = time(NULL);
+    now += cal_day_offset * 86400;
+    struct tm td;
+    localtime_r(&now, &td);
+    char fetch_date[9];
+    snprintf(fetch_date, sizeof(fetch_date), "%04d%02d%02d",
+             td.tm_year + 1900, td.tm_mon + 1, td.tm_mday);
+    if (s_completed_date[u][0] != '\0' && strcmp(s_completed_date[u], fetch_date) != 0) {
+        return false;  /* stale — saved for a different date */
+    }
+
     for (int i = 0; i < s_completed_count[u]; i++) {
         if (strcmp(s_completed_keys[u][i].key, task->id) == 0) return true;
         char composite[COMP_KEY_LEN];
