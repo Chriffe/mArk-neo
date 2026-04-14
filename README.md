@@ -10,7 +10,7 @@ Built on a 10" touchscreen, mArk lives on the kitchen counter or wherever the fa
 - Streak system with levels (Starter → Consistent → Dedicated → Unstoppable → Legend → Titan)
 - Rotary encoder for scrolling through tasks without touching the screen
 - Web interface for managing calendars from any phone — no computer needed
-- Soft power button: short press to sleep/wake, hold 3 seconds for deep sleep
+- Soft power button: short press to turn the display and LEDs on/off
 
 ---
 
@@ -225,7 +225,6 @@ To switch between people on the display: tap the person icons in the left sideba
 | Tap **Settings** | Manage users and calendars |
 | Tap a person icon | Switch to that person's task list |
 | Short press power button | Turn display and LEDs on/off |
-| Hold power button 3 seconds | Deep sleep mode (press again to wake) |
 
 Tasks refresh automatically every 5 minutes. The display also refreshes when you wake it up.
 
