@@ -22,12 +22,12 @@
 static const char *TAG = "STREAK";
 
 static const streak_level_t LEVELS[] = {
-    { "Starter",      0   },
-    { "Consistent",   5   },
-    { "Dedicated",    15  },
-    { "Unstoppable",  30  },
-    { "Legend",       50  },
-    { "Titan",        100 },
+    { "Lärling",      0   },
+    { "Upptäckare",   5   },
+    { "Magiker",      15  },
+    { "Mästare",      30  },
+    { "Stormästare",  50  },
+    { "Tidsväktare",  100 },
 };
 #define NUM_LEVELS (sizeof(LEVELS) / sizeof(LEVELS[0]))
 
@@ -278,6 +278,105 @@ void streak_read_user(int user_idx, streak_data_t *out) {
         nvs_get_i32(h, "lastD",  &out->last_day);
         nvs_close(h);
     }
+}
+
+void streak_shift_down(int removed_idx, int new_count) {
+    /* When a user at removed_idx is deleted, shift all higher-index NVS
+     * namespaces down by 1 so indices stay in sync with users[]. */
+    for (int i = removed_idx; i < new_count; i++) {
+        char src_m[16], src_w[16], dst_m[16], dst_w[16];
+        ns_main(i + 1, src_m, sizeof(src_m));
+        ns_wal( i + 1, src_w, sizeof(src_w));
+        ns_main(i,     dst_m, sizeof(dst_m));
+        ns_wal( i,     dst_w, sizeof(dst_w));
+
+        /* Read from i+1 */
+        int32_t s = 0, y = 0, mo = 0, d = 0;
+        nvs_handle_t h;
+        if (nvs_open(src_m, NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_i32(h, "streak", &s);
+            nvs_get_i32(h, "lastY",  &y);
+            nvs_get_i32(h, "lastM",  &mo);
+            nvs_get_i32(h, "lastD",  &d);
+            nvs_close(h);
+        }
+
+        /* Write to i */
+        if (nvs_open(dst_m, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_i32(h, "streak", s);
+            nvs_set_i32(h, "lastY",  y);
+            nvs_set_i32(h, "lastM",  mo);
+            nvs_set_i32(h, "lastD",  d);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+
+        /* Clear WAL at old slot */
+        if (nvs_open(src_w, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_erase_all(h);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+        /* Clear WAL at new slot (was overwritten above) */
+        if (nvs_open(dst_w, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_erase_all(h);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+
+    /* Erase the now-orphaned last slot */
+    char last_m[16], last_w[16];
+    ns_main(new_count, last_m, sizeof(last_m));
+    ns_wal( new_count, last_w, sizeof(last_w));
+    nvs_handle_t h;
+    if (nvs_open(last_m, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_all(h); nvs_commit(h); nvs_close(h);
+    }
+    if (nvs_open(last_w, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_all(h); nvs_commit(h); nvs_close(h);
+    }
+
+    /* Re-sync s_loaded_user if it shifted */
+    if (s_loaded_user > removed_idx) {
+        s_loaded_user--;
+    } else if (s_loaded_user == removed_idx) {
+        s_loaded_user = -1;  /* removed user — caller must call streak_set_active_user */
+    }
+
+    ESP_LOGI(TAG, "streak_shift_down: removed=%d new_count=%d s_loaded=%d",
+             removed_idx, new_count, s_loaded_user);
+}
+
+void streak_reset_user(int user_idx) {
+    if (user_idx < 0 || user_idx >= MAX_USERS) return;
+
+    if (user_idx == s_loaded_user) {
+        memset(&streak_data, 0, sizeof(streak_data));
+        save_with_wal_for_user(user_idx);
+    } else {
+        char ns_m[16], ns_w[16];
+        ns_main(user_idx, ns_m, sizeof(ns_m));
+        ns_wal(user_idx,  ns_w, sizeof(ns_w));
+
+        nvs_handle_t wal;
+        if (nvs_open(ns_w, NVS_READWRITE, &wal) == ESP_OK) {
+            nvs_erase_all(wal);
+            nvs_commit(wal);
+            nvs_close(wal);
+        }
+
+        nvs_handle_t h;
+        if (nvs_open(ns_m, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_i32(h, "streak", 0);
+            nvs_set_i32(h, "lastY",  0);
+            nvs_set_i32(h, "lastM",  0);
+            nvs_set_i32(h, "lastD",  0);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+    ESP_LOGI(TAG, "User %d streak reset to 0", user_idx);
 }
 
 /* Return the level name for an arbitrary streak count */
