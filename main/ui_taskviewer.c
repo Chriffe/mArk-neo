@@ -18,6 +18,8 @@
 #include "web_config.h"
 #include "user_store.h"
 #include "bsp_illuminate.h"
+#include "timer_engine.h"
+#include "power_button.h"
 
 
 static const char *TAG = "UI";
@@ -147,16 +149,32 @@ static lv_obj_t *leaderboard_overlay = NULL;
 static lv_obj_t *sleep_overlay = NULL;
 static bool      display_sleeping = false;
 
+/* ── Timer button (on task card) ── */
+static lv_obj_t *btn_timer     = NULL;
+static lv_obj_t *lbl_btn_timer = NULL;
+
+/* ── Timer popup state ── */
+static lv_obj_t   *s_timer_popup           = NULL;   /* full-screen overlay */
+static lv_obj_t   *s_timer_popup_arc       = NULL;
+static lv_obj_t   *s_timer_popup_lbl       = NULL;   /* mm:ss or "Stopp" */
+static lv_obj_t   *s_timer_popup_pause_lbl = NULL;   /* pause/play button label */
+static lv_timer_t *s_timer_popup_lv_timer  = NULL;   /* 250 ms update tick */
+static lv_obj_t   *s_busy_popup            = NULL;   /* "already running" notice */
+
 /* ── Forward declarations ── */
 static void refresh_task(void);
 static void refresh_progress(void);
 static void refresh_dots(void);
 static void refresh_sidebar(void);
 static void show_complete_screen(void);
+static void hide_complete_screen(void);
 static void user_bar_refresh(void);
 static void show_leaderboard(void);
-static void hide_complete_screen(void);
+static void hide_leaderboard(void);
 static void cb_clock_tick(lv_timer_t *t);
+static void close_timer_popup(void);
+static void show_timer_popup(void);
+static void on_timer_expired(void *arg);
 
 /* ── Callbacks for completion screen (C doesn't have lambdas) ── */
 static void cb_back_to_tasks(lv_event_t *e) {
@@ -232,9 +250,6 @@ static void cb_gesture(lv_event_t *e) {
 }
 
 /* Dark mode toggle — rebuild entire UI with new theme */
-static void show_leaderboard(void);
-static void hide_leaderboard(void);
-
 static void cb_toggle_dark(lv_event_t *e) {
     (void)e;
     ui_dark_mode = !ui_dark_mode;
@@ -345,7 +360,21 @@ static void cb_sleep_display(lv_event_t *e) {
     ws2812_off();
 }
 
-/* ── On-screen keyboard ── */
+/* ── On-screen keyboard ─────────────────────────────────────────────────────
+ * A full QWERTY layout with Swedish characters (å ä ö). Three modes:
+ *   mode=0  lowercase     mode=1  uppercase     mode=2  numeric/symbols
+ * Special key codes (control characters in the key string):
+ *   \x01 = shift toggle   \x02 = backspace   \x03 = switch to 123
+ *   \x04 = submit/done    \x05 = switch to abc
+ *
+ * The keyboard replaces the main screen with a full-screen overlay. When used
+ * from settings (to type a URL or user name), kb_on_submit is set to a custom
+ * callback; when adding a quick local task it is left NULL.
+ * ─────────────────────────────────────────────────────────────────────────── */
+#define KB_PAD    16   /* inner padding within the keyboard panel */
+#define KB_GAP     5   /* gap between keys */
+#define KB_TOP_H  88   /* height reserved for close button + input field */
+
 static void show_keyboard(void);
 static void hide_keyboard(void);
 
@@ -531,10 +560,6 @@ static void show_keyboard(void) {
     lv_obj_set_style_radius(kb_panel, BEZEL_INNER_R, 0);
     lv_obj_clear_flag(kb_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    #define KB_PAD   16   /* inner padding within panel */
-    #define KB_GAP    5
-    #define KB_TOP_H 88   /* reserved height for close btn + input (pad + 60px + gap) */
-
     /* Close button — top-left of inner panel, fully visible below bezel */
     lv_obj_t *btn_close = lv_btn_create(kb_panel);
     lv_obj_set_size(btn_close, 52, 60);
@@ -660,7 +685,20 @@ static void hide_keyboard(void) {
     ui_showing_keyboard = false;
 }
 
-/* ── Settings overlay — two-level: User List → Source Editor ── */
+/* ── Settings overlay ────────────────────────────────────────────────────────
+ * Two-level navigation:
+ *   Level 1: User list — one row per user with rename/remove buttons.
+ *            If only one user exists, this level is skipped entirely.
+ *   Level 2: Source editor — list of cal_source_t entries for that user,
+ *            with enable/disable checkbox and add/remove controls.
+ *
+ * The overlay shell is created by settings_ensure_overlay() and reused between
+ * the two levels. Popping from Level 2 back to Level 1 just calls
+ * settings_populate_user_list() without recreating the shell.
+ *
+ * The keyboard flow temporarily destroys the overlay (to use the full screen),
+ * and settings_ensure_overlay() is idempotent so it can recreate it safely.
+ * ─────────────────────────────────────────────────────────────────────────── */
 static cal_source_t settings_temp_sources[MAX_CAL_SOURCES];
 static int settings_temp_count = 0;
 static lv_obj_t *settings_list_container = NULL;
@@ -706,23 +744,41 @@ static void cb_settings_remove_user(lv_event_t *e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (user_count <= 1) return;
 
-    /* If removing the active user, switch to another user first */
-    if (idx == active_user) {
+    bool was_active = (idx == active_user);
+    if (was_active) {
+        /* Switch to the nearest other user (prefer lower index so we don't land out-of-bounds) */
+        int new_active = (idx > 0) ? idx - 1 : 1;
         calendar_save_completion_state();
-        active_user = (idx == 0) ? 1 : 0;
+        active_user = new_active;
         calendar_sources_load_user(active_user);
         streak_set_active_user(active_user);
         challenge_set_active_user(active_user);
+        if (!calendar_restore_cached_tasks(active_user)) {
+            calendar_set_offline_placeholder();
+        }
+        calendar_save_completion_state();
         calendar_suppress_next_completion_save();
-        calendar_fetch();
-        ui_refresh_all();
     }
+
     user_store_remove(idx);
-    streak_shift_down(idx, user_count);      /* keep streak NVS indices in sync */
-    challenge_shift_down(idx, user_count);   /* keep challenge NVS indices in sync */
-    streak_set_active_user(active_user);     /* re-sync in-memory state to new indices */
+    streak_shift_down(idx, user_count);
+    challenge_shift_down(idx, user_count);
+
+    /* Indices above the removed slot shift down by 1 after removal */
+    if (idx < active_user) {
+        active_user--;
+    }
+
+    streak_set_active_user(active_user);
     challenge_set_active_user(active_user);
     user_store_save();
+
+    if (was_active) {
+        ui_current = 0;
+        ui_completed = calendar_get_completed();
+        calendar_request_refresh();
+        ui_refresh_all();
+    }
     settings_populate_user_list();
 }
 
@@ -1253,6 +1309,340 @@ static void cb_refresh(lv_event_t *e) {
     calendar_request_refresh();
 }
 
+/* ── Timer feature ── */
+
+static void close_timer_popup(void) {
+    if (s_timer_popup_lv_timer) {
+        lv_timer_del(s_timer_popup_lv_timer);
+        s_timer_popup_lv_timer = NULL;
+    }
+    if (s_timer_popup) {
+        lv_obj_del(s_timer_popup);
+        s_timer_popup           = NULL;
+        s_timer_popup_arc       = NULL;
+        s_timer_popup_lbl       = NULL;
+        s_timer_popup_pause_lbl = NULL;
+    }
+}
+
+/* Tick callback at 250 ms — updates arc and label while popup is visible */
+static void cb_timer_popup_tick(lv_timer_t *t) {
+    (void)t;
+    if (!s_timer_popup) return;
+    const timer_state_t *ts = timer_engine_get_state();
+    uint32_t rem = timer_engine_remaining_sec();
+
+    if (s_timer_popup_arc) {
+        lv_arc_set_value(s_timer_popup_arc, (int32_t)rem);
+    }
+    if (s_timer_popup_lbl) {
+        if (ts->expired) {
+            lv_label_set_text(s_timer_popup_lbl, "Stopp");
+        } else {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)(rem / 60), (unsigned)(rem % 60));
+            lv_label_set_text(s_timer_popup_lbl, buf);
+        }
+    }
+}
+
+/* 1 s tick — keeps timer button countdown fresh without a full refresh */
+static void cb_timer_btn_tick(lv_timer_t *t) {
+    (void)t;
+    if (!btn_timer || !lbl_btn_timer || cal_task_count <= 0) return;
+    const timer_state_t *ts = timer_engine_get_state();
+    if (!ts->active && !ts->paused) return;
+    if (ts->task_idx != ui_current || ts->user_idx != active_user) return;
+    uint32_t rem = timer_engine_remaining_sec();
+    char buf[20];
+    snprintf(buf, sizeof(buf), LV_SYMBOL_BELL " %02u:%02u",
+             (unsigned)(rem / 60), (unsigned)(rem % 60));
+    lv_label_set_text(lbl_btn_timer, buf);
+}
+
+/* Close timer popup — cancel if expired, just hide if running */
+static void cb_timer_popup_close(lv_event_t *e) {
+    (void)e;
+    const timer_state_t *ts = timer_engine_get_state();
+    if (ts->expired) {
+        sound_timer_stop();
+        timer_engine_cancel();
+    }
+    close_timer_popup();
+    refresh_task();
+}
+
+/* Card click in expired state cancels the timer */
+static void cb_timer_card_click(lv_event_t *e) {
+    (void)e;
+    const timer_state_t *ts = timer_engine_get_state();
+    if (ts->expired) {
+        sound_timer_stop();
+        timer_engine_cancel();
+        close_timer_popup();
+        refresh_task();
+    }
+}
+
+static void cb_timer_pause(lv_event_t *e) {
+    (void)e;
+    const timer_state_t *ts = timer_engine_get_state();
+    if (ts->paused) {
+        timer_engine_resume();
+    } else {
+        timer_engine_pause();
+    }
+    if (s_timer_popup_pause_lbl) {
+        const timer_state_t *nts = timer_engine_get_state();
+        lv_label_set_text(s_timer_popup_pause_lbl,
+                          nts->paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+    }
+}
+
+static void cb_timer_restart(lv_event_t *e) {
+    (void)e;
+    sound_timer_stop();
+    timer_engine_reset();
+    close_timer_popup();
+    show_timer_popup();
+}
+
+static void show_timer_popup(void) {
+    close_timer_popup();  /* close any existing popup first */
+
+    const timer_state_t *ts = timer_engine_get_state();
+    bool expired = ts->expired;
+    uint32_t rem = timer_engine_remaining_sec();
+
+    /* Full-screen semi-transparent overlay — clicks outside card close popup */
+    s_timer_popup = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_timer_popup);
+    lv_obj_set_size(s_timer_popup, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(s_timer_popup, 0, 0);
+    lv_obj_set_style_bg_color(s_timer_popup, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_timer_popup, LV_OPA_50, 0);
+    lv_obj_add_flag(s_timer_popup, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_timer_popup, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_timer_popup, cb_timer_popup_close, LV_EVENT_CLICKED, NULL);
+
+    /* Modal card — pad_all=0 so positions below are exact card-relative px */
+    lv_obj_t *card = lv_obj_create(s_timer_popup);
+    lv_obj_set_size(card, 300, 360);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_set_style_bg_color(card, th_bg(), 0);
+    lv_obj_set_style_radius(card, 20, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_shadow_width(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(card, cb_timer_card_click, LV_EVENT_CLICKED, NULL);
+
+    /* Depleting arc — full circle, orange indicator depletes as time passes.
+     * Card width=300, arc=210: left/right padding = (300-210)/2 = 45 px. */
+    lv_obj_t *arc = lv_arc_create(card);
+    lv_obj_set_size(arc, 210, 210);
+    lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 22);
+    lv_arc_set_rotation(arc, 270);
+    lv_arc_set_bg_angles(arc, 0, 360);
+    lv_arc_set_range(arc, 0, (int32_t)ts->duration_sec);
+    lv_arc_set_value(arc, (int32_t)rem);
+    lv_obj_set_style_arc_color(arc, C_ACCENT, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(arc, 12, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, th_track(), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_border_width(arc, 0, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(arc, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+    s_timer_popup_arc = arc;
+
+    /* Centre label overlaid on arc: "mm:ss" while running, "Stopp" when expired.
+     * Arc top=22, height=210, centre=22+105=127. Font ui_48 ~56px tall → top=127-28=99. */
+    lv_obj_t *lbl = lv_label_create(card);
+    if (expired) {
+        lv_label_set_text(lbl, "Stopp");
+    } else {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02u:%02u", (unsigned)(rem / 60), (unsigned)(rem % 60));
+        lv_label_set_text(lbl, buf);
+    }
+    lv_obj_set_style_text_font(lbl, &lv_font_ui_48, 0);
+    lv_obj_set_style_text_color(lbl, th_fg(), 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 99);
+    s_timer_popup_lbl = lbl;
+
+    /* Button row at y=262.  Card=300, two btns: (300-124)/2=88 left margin.
+     * Single btn (expired): (300-52)/2=124 left margin. */
+    int btn_y = 262;
+    if (!expired) {
+        lv_obj_t *btn_pause = lv_btn_create(card);
+        lv_obj_set_size(btn_pause, 52, 52);
+        lv_obj_set_pos(btn_pause, 88, btn_y);
+        lv_obj_set_style_pad_all(btn_pause, 0, 0);
+        lv_obj_set_style_bg_color(btn_pause, th_fg(), 0);
+        lv_obj_set_style_radius(btn_pause, 26, 0);
+        lv_obj_set_style_shadow_width(btn_pause, 0, 0);
+        lv_obj_add_event_cb(btn_pause, cb_timer_pause, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *pl = lv_label_create(btn_pause);
+        lv_label_set_text(pl, ts->paused ? LV_SYMBOL_PLAY : LV_SYMBOL_PAUSE);
+        lv_obj_set_style_text_color(pl, th_bg(), 0);
+        lv_obj_set_style_text_font(pl, icon_font_md(), 0);
+        lv_obj_center(pl);
+        s_timer_popup_pause_lbl = pl;
+    }
+
+    int restart_x = expired ? 124 : 160;  /* centred or right-of-pause */
+    lv_obj_t *btn_restart = lv_btn_create(card);
+    lv_obj_set_size(btn_restart, 52, 52);
+    lv_obj_set_pos(btn_restart, restart_x, btn_y);
+    lv_obj_set_style_pad_all(btn_restart, 0, 0);
+    lv_obj_set_style_bg_color(btn_restart, th_fg(), 0);
+    lv_obj_set_style_radius(btn_restart, 26, 0);
+    lv_obj_set_style_shadow_width(btn_restart, 0, 0);
+    lv_obj_add_event_cb(btn_restart, cb_timer_restart, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *rl = lv_label_create(btn_restart);
+    lv_label_set_text(rl, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_color(rl, th_bg(), 0);
+    lv_obj_set_style_text_font(rl, icon_font_md(), 0);
+    lv_obj_center(rl);
+
+    /* 250 ms tick to keep arc and label updated */
+    s_timer_popup_lv_timer = lv_timer_create(cb_timer_popup_tick, 250, NULL);
+}
+
+/* "Already running" toast — auto-dismisses after 3 s.
+ *
+ * Design decisions:
+ *   1. No click-to-dismiss handler: if we added one, a click would delete the
+ *      overlay while the pending lv_timer still holds a raw pointer to it,
+ *      causing a use-after-free crash when the timer fires later.
+ *   2. s_busy_popup static pointer + dismiss-previous-before-create: prevents
+ *      multiple overlapping toasts if the user taps the button rapidly.
+ *   3. lv_timer_set_repeat_count(tmr, 1): LVGL auto-deletes the timer after
+ *      one fire, so the callback must NOT also call lv_timer_del(t). */
+static void cb_busy_popup_autodismiss(lv_timer_t *t) {
+    (void)t;  /* lv_timer_set_repeat_count(1) auto-deletes t after this returns */
+    if (s_busy_popup) {
+        lv_obj_del(s_busy_popup);
+        s_busy_popup = NULL;
+    }
+}
+
+static void show_timer_busy_popup(void) {
+    /* Dismiss any previous instance before creating a new one */
+    if (s_busy_popup) {
+        lv_obj_del(s_busy_popup);
+        s_busy_popup = NULL;
+    }
+
+    s_busy_popup = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_busy_popup);
+    lv_obj_set_size(s_busy_popup, SCREEN_W, SCREEN_H);
+    lv_obj_set_pos(s_busy_popup, 0, 0);
+    lv_obj_set_style_bg_color(s_busy_popup, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_busy_popup, LV_OPA_40, 0);
+    lv_obj_clear_flag(s_busy_popup, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *card = lv_obj_create(s_busy_popup);
+    lv_obj_set_size(card, 300, 100);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_pad_all(card, 0, 0);
+    lv_obj_set_style_bg_color(card, th_bg(), 0);
+    lv_obj_set_style_radius(card, 16, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_shadow_width(card, 0, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_text(lbl, "En timer k\xC3\xB6rs\nredan i bakgrunden");
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(lbl, 260);
+    lv_obj_set_style_text_font(lbl, &lv_font_ui_14, 0);
+    lv_obj_set_style_text_color(lbl, th_fg(), 0);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+
+    lv_timer_t *tmr = lv_timer_create(cb_busy_popup_autodismiss, 3000, NULL);
+    lv_timer_set_repeat_count(tmr, 1);
+}
+
+static void cb_timer_btn(lv_event_t *e) {
+    (void)e;
+    if (cal_task_count <= 0 || ui_current >= cal_task_count) return;
+
+    const timer_state_t *ts = timer_engine_get_state();
+    bool same_task = (ts->task_idx == ui_current && ts->user_idx == active_user);
+
+    if (timer_engine_is_busy() || ts->expired) {
+        if (!same_task) {
+            show_timer_busy_popup();
+            return;
+        }
+        /* Same task — reopen the popup (may have been closed while timer runs) */
+        show_timer_popup();
+        return;
+    }
+
+    /* Start a fresh timer */
+    cal_task_t *ct = &cal_tasks[ui_current];
+    timer_engine_start(ui_current, active_user, ct->timer_duration_sec);
+    show_timer_popup();
+}
+
+/* Called via lv_async_call when the esp_timer tick fires — runs inside
+ * lv_task_handler() which already holds the LVGL port mutex.
+ *
+ * Important: do NOT call ui_wake_display() here. That function tries to
+ * acquire the LVGL lock via lvgl_port_lock(), which would deadlock because
+ * we are already inside the lock. Instead, manipulate sleep_overlay directly
+ * (safe, we hold the lock) and call power_button_force_wake() for the
+ * backlight and power_button state (safe, it never touches LVGL objects).
+ */
+static void on_timer_expired(void *arg) {
+    (void)arg;
+    const timer_state_t *ts = timer_engine_get_state();
+
+    /* Wake display if it was sleeping */
+    if (display_sleeping) {
+        if (sleep_overlay) {
+            lv_obj_del(sleep_overlay);
+            sleep_overlay = NULL;
+        }
+        display_sleeping = false;
+        power_button_force_wake();  /* turns on backlight, syncs power button's display_on */
+    }
+
+    /* Switch user if timer was running for a different user */
+    if (ts->user_idx != active_user && ts->user_idx < user_count) {
+        calendar_save_completion_state();
+        calendar_sources_save_user(active_user);
+        active_user = ts->user_idx;
+        user_store_save();
+        calendar_sources_load_user(active_user);
+        streak_set_active_user(active_user);
+        challenge_set_active_user(active_user);
+        if (!calendar_restore_cached_tasks(active_user)) {
+            calendar_set_offline_placeholder();
+        }
+        calendar_save_completion_state();
+        calendar_suppress_next_completion_save();
+        calendar_request_refresh();
+    }
+
+    /* Navigate to the expired task */
+    if (ts->task_idx >= 0 && ts->task_idx < cal_task_count) {
+        ui_current = ts->task_idx;
+    }
+
+    ui_completed = calendar_get_completed();
+    ui_refresh_all();
+
+    /* Alarm and popup */
+    sound_timer_alarm();
+    show_timer_popup();  /* shows in expired state since ts->expired == true */
+}
+
 /* ── Refresh functions ── */
 static void refresh_task(void) {
     /* Handle empty task list */
@@ -1267,6 +1657,7 @@ static void refresh_task(void) {
         lv_obj_add_flag(badge_completed, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(img_challenge_medal_sm, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_challenge_progress, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(btn_timer, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
@@ -1312,6 +1703,31 @@ static void refresh_task(void) {
     } else {
         lv_obj_add_flag(img_challenge_medal_sm, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(lbl_challenge_progress, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* Timer button */
+    if (t->timer_duration_sec > 0) {
+        lv_obj_clear_flag(btn_timer, LV_OBJ_FLAG_HIDDEN);
+        const timer_state_t *ts = timer_engine_get_state();
+        bool timer_here = (ts->active || ts->paused || ts->expired) &&
+                          ts->task_idx == ui_current && ts->user_idx == active_user;
+        if (timer_here) {
+            uint32_t rem = timer_engine_remaining_sec();
+            char buf[20];
+            snprintf(buf, sizeof(buf), LV_SYMBOL_BELL " %02u:%02u",
+                     (unsigned)(rem / 60), (unsigned)(rem % 60));
+            lv_label_set_text(lbl_btn_timer, buf);
+            lv_obj_set_style_bg_color(btn_timer,
+                                      ts->paused ? th_muted() : C_ACCENT, 0);
+        } else {
+            uint32_t min = (t->timer_duration_sec + 59) / 60;
+            char buf[20];
+            snprintf(buf, sizeof(buf), LV_SYMBOL_BELL " %d min", (int)min);
+            lv_label_set_text(lbl_btn_timer, buf);
+            lv_obj_set_style_bg_color(btn_timer, C_ACCENT, 0);
+        }
+    } else {
+        lv_obj_add_flag(btn_timer, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1507,14 +1923,15 @@ static void user_bar_refresh(void) {
     }
 }
 
-/* ── Leaderboard overlay ── */
-
-/* ── Leaderboard tap-reset gestures ──
- *   5 taps  in 2 s → reset streak
- *  10 taps  in 2 s → reset all medals (parent override)
- * The counter persists across overlay rebuilds (static arrays), so the user
- * can streak-reset at 5 and then continue tapping to 10 for medal reset.
- */
+/* ── Leaderboard overlay ─────────────────────────────────────────────────────
+ * Tap-reset gestures for parent/admin override (hidden feature):
+ *   5 taps on a user row within 2 s → reset that user's streak to 0
+ *  10 taps on a user row within 2 s → also reset all of that user's medals
+ *
+ * The tap counter is in a static array so it persists across overlay rebuilds.
+ * The user can streak-reset at tap 5, then continue tapping toward 10 without
+ * resetting the window.
+ * ─────────────────────────────────────────────────────────────────────────── */
 #define LB_STREAK_RESET_TAPS  5
 #define LB_MEDAL_RESET_TAPS  10
 #define LB_RESET_WINDOW_MS   2000
@@ -1709,36 +2126,38 @@ static void cb_open_leaderboard(lv_event_t *e) {
     show_leaderboard();
 }
 
+/* Switch the active user. Order matters for completion state integrity:
+ *   1. Save outgoing user's completion keys before active_user changes.
+ *   2. Switch active_user, load new user's sources/streak/challenge.
+ *   3. Restore cached tasks immediately so the UI doesn't show a blank screen.
+ *   4. Seed the new user's completion keys from the just-restored cache so
+ *      the background fetch's was_completed() checks use the right state.
+ *   5. Request a background network refresh; suppress the completion save that
+ *      calendar_fetch() would normally do so we don't clobber the slot we
+ *      just seeded in step 4. */
 static void cb_switch_user(lv_event_t *e) {
     int new_idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (new_idx == active_user || new_idx >= user_count) return;
 
-    /* Save outgoing user's completion state and calendar sources before switching */
     calendar_save_completion_state();
     calendar_sources_save_user(active_user);
 
-    /* Switch active user and persist */
     active_user = new_idx;
     user_store_save();
 
-    /* Load the new user's data */
     calendar_sources_load_user(active_user);
     streak_set_active_user(active_user);
     challenge_set_active_user(active_user);
 
-    /* Restore cached tasks instantly — falls back to placeholder if never fetched before */
     if (!calendar_restore_cached_tasks(active_user)) {
         calendar_set_offline_placeholder();
     }
-    /* Sync s_completed_keys for new user from whatever cal_tasks[] now holds,
-     * so the background network fetch's was_completed() calls use correct state. */
     calendar_save_completion_state();
 
     ui_completed = calendar_get_completed();
     ui_current = 0;
     ui_refresh_all();
 
-    /* Refresh from network in background — suppress save to preserve completion slot */
     calendar_suppress_next_completion_save();
     calendar_request_refresh();
 }
@@ -1836,9 +2255,9 @@ static void rebuild_user_bar(void) {
 void ui_build(void) {
     lv_obj_t *scr = lv_scr_act();
 
-    /* Prevent the root screen from scrolling — otherwise a slight finger drag
-     * in the sidebar triggers LVGL's scroll-chain and the whole screen shifts,
-     * swallowing click events (CLICKED never fires on the button). */
+    /* LVGL 9 propagates scroll events up the parent chain by default. Without
+     * these flags a finger drag anywhere will scroll the root screen, shifting
+     * all children and swallowing the subsequent CLICKED event on buttons. */
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
@@ -1846,7 +2265,10 @@ void ui_build(void) {
     lv_obj_set_style_bg_color(scr, th_bg(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    /* Full-screen black base — renders as the bezel, sits below all panels */
+    /* Bezel simulation: a full-screen black rectangle sits behind all panels.
+     * The physical display opening is slightly smaller than 1024×600, so the
+     * black edges show through as a natural-looking bezel border. No clipping
+     * masks needed — the panels are positioned to fit inside the opening. */
     lv_obj_t *bezel_base = lv_obj_create(scr);
     lv_obj_remove_style_all(bezel_base);
     lv_obj_set_size(bezel_base, SCREEN_W, SCREEN_H);
@@ -2221,6 +2643,25 @@ void ui_build(void) {
     lv_obj_set_style_text_font(nl, icon_font_sm(), 0);
     lv_obj_center(nl);
 
+    /* Timer button — left of btn_complete, hidden until a [T] task is current */
+    btn_timer = lv_btn_create(mp);
+    lv_obj_set_size(btn_timer, 120, 52);
+    lv_obj_set_pos(btn_timer, MAIN_W - 388, PANEL_H - 72);
+    lv_obj_set_style_bg_color(btn_timer, C_ACCENT, 0);
+    lv_obj_set_style_radius(btn_timer, 12, 0);
+    lv_obj_set_style_shadow_width(btn_timer, 0, 0);
+    lv_obj_add_flag(btn_timer, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(btn_timer, cb_timer_btn, LV_EVENT_CLICKED, NULL);
+
+    lbl_btn_timer = lv_label_create(btn_timer);
+    lv_label_set_text(lbl_btn_timer, "");
+    lv_obj_set_style_text_color(lbl_btn_timer, C_WHITE, 0);
+    lv_obj_set_style_text_font(lbl_btn_timer, icon_font_sm(), 0);  /* montserrat: has symbols */
+    lv_obj_center(lbl_btn_timer);
+
+    /* Register expiry callback — fires in LVGL context via lv_async_call */
+    timer_engine_set_expiry_cb(on_timer_expired);
+
     /* Initial render */
     refresh_dots();
     refresh_progress();
@@ -2230,6 +2671,9 @@ void ui_build(void) {
 
     /* Clock update timer (every 10 seconds) */
     lv_timer_create(cb_clock_tick, 10000, NULL);
+
+    /* Timer button countdown ticker (every 1 second) */
+    lv_timer_create(cb_timer_btn_tick, 1000, NULL);
 
     /* Bezel = screen black background showing through — no extra objects needed */
 
@@ -2279,6 +2723,7 @@ void ui_refresh_all(void) {
 void ui_next_task(void) { cb_next(NULL); }
 void ui_prev_task(void) { cb_prev(NULL); }
 bool ui_is_complete_shown(void) { return ui_showing_complete || ui_showing_keyboard || ui_showing_settings; }
+bool ui_is_sleeping(void) { return display_sleeping; }
 void ui_complete_current_task(void) { cb_complete(NULL); }
 void ui_dismiss_complete(void) { hide_complete_screen(); }
 

@@ -1,9 +1,14 @@
 /**
  * Sound driver — I2S audio via ESP-IDF
- * CrowPanel Advanced has built-in audio amplifier on SPK-R/SPK-L
  *
- * Note: Exact I2S pins need verification from the CrowPanel P4 schematic.
- * The pins below are placeholders — check your board's documentation.
+ * The CrowPanel Advanced 10.1" (ESP32-P4) has a built-in NS4168 mono amplifier
+ * connected to a small speaker. I2S is wired to I2S_NUM_1. The amp enable pin
+ * (AMP_CTRL_PIN) is active-LOW — bring it low to unmute, high to mute/idle.
+ * Keeping the amp off while no audio is playing prevents a constant hiss.
+ *
+ * All sound events are handled by a single background FreeRTOS task to avoid
+ * blocking the LVGL or calendar tasks during tone generation. Callers enqueue
+ * a sound_event_t ID and return immediately.
  */
 #include "sound_driver.h"
 
@@ -33,7 +38,14 @@ static QueueHandle_t sound_queue = NULL;
 static bool sound_ready = false;
 static int  s_volume = 80;   /* 0–100, persisted in NVS */
 
-typedef enum { SOUND_TASK_COMPLETE = 1, SOUND_DAY_COMPLETE = 2 } sound_event_t;
+typedef enum {
+    SOUND_TASK_COMPLETE = 1,
+    SOUND_DAY_COMPLETE  = 2,
+    SOUND_TIMER_ALARM   = 3,
+    SOUND_TIMER_STOP    = 4,
+} sound_event_t;
+
+static volatile bool s_alarm_active = false;
 
 static void amp_on(void)  { gpio_set_level(AMP_CTRL_PIN, 0); }
 static void amp_off(void) { gpio_set_level(AMP_CTRL_PIN, 1); }
@@ -105,6 +117,7 @@ static void play_tone(uint16_t freq, uint16_t duration_ms, uint8_t volume) {
     amp_off();
 }
 
+/* ── Background worker — pulls events from the queue and synthesises tones ── */
 static void sound_worker(void *arg) {
     uint8_t evt;
     while (1) {
@@ -126,15 +139,35 @@ static void sound_worker(void *arg) {
                 vTaskDelay(pdMS_TO_TICKS(25));
                 play_tone(1047, 250, 85);
                 break;
+            case SOUND_TIMER_ALARM:
+                if (s_alarm_active) {
+                    ESP_LOGI(TAG, ">>> TIMER ALARM beep");
+                    play_tone(987,  110, 80);
+                    vTaskDelay(pdMS_TO_TICKS(45));
+                    play_tone(1175, 110, 80);
+                    vTaskDelay(pdMS_TO_TICKS(45));
+                    play_tone(1568, 260, 90);
+                    vTaskDelay(pdMS_TO_TICKS(700));
+                    /* Re-enqueue to repeat while flag is set */
+                    if (s_alarm_active) {
+                        uint8_t ev2 = SOUND_TIMER_ALARM;
+                        xQueueSend(sound_queue, &ev2, 0);
+                    }
+                }
+                break;
+            case SOUND_TIMER_STOP:
+                s_alarm_active = false;
+                ESP_LOGI(TAG, ">>> TIMER ALARM stopped");
+                break;
             }
         }
     }
 }
 
 void sound_init(void) {
-    ESP_LOGW(TAG, "===== Sound init starting =====");
+    ESP_LOGI(TAG, "Sound init starting");
 
-    /* Load persisted volume */
+    /* Load volume persisted from previous session (defaults to 80 if never set) */
     nvs_handle_t nvs_h;
     if (nvs_open("settings", NVS_READONLY, &nvs_h) == ESP_OK) {
         int32_t vol = 80;
@@ -143,7 +176,7 @@ void sound_init(void) {
         nvs_close(nvs_h);
     }
 
-    /* Enable amplifier (NS4168 CTRL pin) */
+    /* Configure amp enable GPIO — active LOW, start muted */
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << AMP_CTRL_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -156,9 +189,10 @@ void sound_init(void) {
         ESP_LOGE(TAG, "AMP GPIO config failed: %s", esp_err_to_name(amp_err));
         return;
     }
-    gpio_set_level(AMP_CTRL_PIN, 1);  /* Start with amp OFF (active low) */
-    ESP_LOGW(TAG, "Amplifier OFF at init (GPIO%d = HIGH)", AMP_CTRL_PIN);
+    gpio_set_level(AMP_CTRL_PIN, 1);  /* HIGH = amp muted */
+    ESP_LOGI(TAG, "Amplifier muted at init (GPIO%d HIGH)", AMP_CTRL_PIN);
 
+    /* Create I2S transmit channel — stereo, 16-bit Philips standard */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 6;
     chan_cfg.dma_frame_num = 256;
@@ -168,7 +202,6 @@ void sound_init(void) {
         ESP_LOGE(TAG, "I2S channel create failed: %s", esp_err_to_name(err));
         return;
     }
-    ESP_LOGW(TAG, "I2S channel created OK");
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
@@ -176,14 +209,10 @@ void sound_init(void) {
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
             .bclk = (gpio_num_t)I2S_BCLK_PIN,
-            .ws = (gpio_num_t)I2S_WS_PIN,
+            .ws   = (gpio_num_t)I2S_WS_PIN,
             .dout = (gpio_num_t)I2S_DOUT_PIN,
-            .din = I2S_GPIO_UNUSED,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
+            .din  = I2S_GPIO_UNUSED,
+            .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
 
@@ -192,15 +221,13 @@ void sound_init(void) {
         ESP_LOGE(TAG, "I2S std mode init failed: %s", esp_err_to_name(err));
         return;
     }
-    ESP_LOGW(TAG, "I2S std mode init OK");
 
-    /* Channel stays disabled — play_tone() enables/disables per tone */
-    ESP_LOGW(TAG, "I2S channel ready (enabled on demand)");
-
+    /* Channel left disabled — play_tone() enables it per tone to avoid DMA looping */
     sound_queue = xQueueCreate(6, sizeof(uint8_t));
     xTaskCreate(sound_worker, "sound", 4096, NULL, 1, NULL);
     sound_ready = true;
-    ESP_LOGW(TAG, "===== I2S sound ready (BCLK=%d, WS=%d, DOUT=%d) =====", I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN);
+    ESP_LOGI(TAG, "Sound ready (BCLK=IO%d, WS=IO%d, DOUT=IO%d, AMP=IO%d)",
+             I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN, AMP_CTRL_PIN);
 }
 
 static void enqueue(uint8_t evt) {
@@ -214,3 +241,13 @@ static void enqueue(uint8_t evt) {
 
 void sound_task_complete(void) { enqueue(SOUND_TASK_COMPLETE); }
 void sound_day_complete(void)  { enqueue(SOUND_DAY_COMPLETE); }
+
+void sound_timer_alarm(void) {
+    s_alarm_active = true;
+    enqueue(SOUND_TIMER_ALARM);
+}
+
+void sound_timer_stop(void) {
+    s_alarm_active = false;
+    enqueue(SOUND_TIMER_STOP);
+}
