@@ -51,3 +51,10 @@ void streak_reset_user(int user_idx);
 
 /** Call after user_store_remove(idx) to keep NVS namespaces in sync. */
 void streak_shift_down(int removed_idx, int new_count);
+
+/**
+ * Check if the active user missed a day and reset their streak to 0 if so.
+ * Called automatically by streak_set_active_user(); also call when a date
+ * change is detected at midnight without a user switch.
+ */
+void streak_check_missed_day(void);

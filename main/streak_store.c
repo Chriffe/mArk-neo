@@ -217,18 +217,44 @@ void streak_set_active_user(int user_idx) {
     recover_wal_for_user(user_idx);
     load_for_user(user_idx);
     s_loaded_user = user_idx;
+    streak_check_missed_day();
 
     ESP_LOGI(TAG, "Active user=%d (%s) streak=%" PRId32,
              user_idx, users[user_idx].name, streak_data.streak);
 }
 
 static bool is_consecutive(int y1, int m1, int d1, int y2, int m2, int d2) {
-    struct tm t1 = {0}, t2 = {0};
-    t1.tm_year = y1 - 1900; t1.tm_mon = m1 - 1; t1.tm_mday = d1;
-    t2.tm_year = y2 - 1900; t2.tm_mon = m2 - 1; t2.tm_mday = d2;
-    time_t e1 = mktime(&t1), e2 = mktime(&t2);
-    if (e1 == -1 || e2 == -1) return false;
-    return (e2 - e1) / 86400 == 1;
+    /* Advance d1 by 1 calendar day using mktime normalisation (DST-safe). */
+    struct tm t = {0};
+    t.tm_year = y1 - 1900; t.tm_mon = m1 - 1; t.tm_mday = d1 + 1; t.tm_isdst = -1;
+    mktime(&t);
+    return (t.tm_year + 1900 == y2 && t.tm_mon + 1 == m2 && t.tm_mday == d2);
+}
+
+void streak_check_missed_day(void) {
+    if (streak_data.last_year == 0) return;  /* never completed */
+    if (streak_data.streak == 0) return;     /* already zero */
+
+    time_t now = time(NULL);
+    if (now < 1700000000) return;  /* NTP not yet synced */
+
+    struct tm t;
+    localtime_r(&now, &t);
+    int y = t.tm_year + 1900, m = t.tm_mon + 1, d = t.tm_mday;
+
+    if (streak_data.last_year == y && streak_data.last_month == m && streak_data.last_day == d)
+        return;  /* completed today — streak intact */
+
+    if (is_consecutive(streak_data.last_year, streak_data.last_month,
+                       streak_data.last_day, y, m, d))
+        return;  /* completed yesterday — still waiting for today */
+
+    ESP_LOGI(TAG, "Streak reset: last=%04" PRId32 "-%02" PRId32 "-%02" PRId32
+             " today=%04d-%02d-%02d",
+             streak_data.last_year, streak_data.last_month, streak_data.last_day,
+             y, m, d);
+    streak_data.streak = 0;
+    save_with_wal_for_user(s_loaded_user);
 }
 
 void streak_mark_day_complete(int day_offset) {
@@ -289,6 +315,9 @@ void streak_shift_down(int removed_idx, int new_count) {
         ns_wal( i + 1, src_w, sizeof(src_w));
         ns_main(i,     dst_m, sizeof(dst_m));
         ns_wal( i,     dst_w, sizeof(dst_w));
+
+        /* Apply any pending WAL for the source slot before reading */
+        recover_wal_for_user(i + 1);
 
         /* Read from i+1 */
         int32_t s = 0, y = 0, mo = 0, d = 0;

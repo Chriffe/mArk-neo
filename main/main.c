@@ -111,6 +111,7 @@ static void calendar_refresh_task(void *arg) {
                      t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
             if (last_date[0] != '\0' && strcmp(last_date, today) != 0) {
                 ESP_LOGI(TAG, "Date changed → %s, refreshing calendar...", today);
+                streak_check_missed_day();
                 calendar_request_refresh();
             }
             strncpy(last_date, today, sizeof(last_date));
