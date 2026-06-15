@@ -781,8 +781,6 @@ static void cb_settings_remove_user(lv_event_t *e) {
     streak_set_active_user(active_user);
     challenge_set_active_user(active_user);
     user_store_save();
-    if (cal_task_count == 0) streak_freeze_day();
-    else streak_check_missed_day();
 
     if (was_active) {
         ui_jump_to_first_incomplete();
@@ -2157,11 +2155,13 @@ static void cb_switch_user(lv_event_t *e) {
     streak_set_active_user(active_user);
     challenge_set_active_user(active_user);
 
-    if (!calendar_restore_cached_tasks(active_user)) {
+    bool restored = calendar_restore_cached_tasks(active_user);
+    if (!restored) {
         calendar_set_offline_placeholder();
+    } else {
+        if (cal_task_count == 0) streak_freeze_day();
+        else streak_check_missed_day();
     }
-    if (cal_task_count == 0) streak_freeze_day();
-    else streak_check_missed_day();
     calendar_save_completion_state();
 
     ui_completed = calendar_get_completed();
