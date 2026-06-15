@@ -217,7 +217,6 @@ void streak_set_active_user(int user_idx) {
     recover_wal_for_user(user_idx);
     load_for_user(user_idx);
     s_loaded_user = user_idx;
-    streak_check_missed_day();
 
     ESP_LOGI(TAG, "Active user=%d (%s) streak=%" PRId32,
              user_idx, users[user_idx].name, streak_data.streak);
@@ -232,6 +231,7 @@ static bool is_consecutive(int y1, int m1, int d1, int y2, int m2, int d2) {
 }
 
 void streak_check_missed_day(void) {
+    if (s_loaded_user < 0) return;           /* no user loaded */
     if (streak_data.last_year == 0) return;  /* never completed */
     if (streak_data.streak == 0) return;     /* already zero */
 
@@ -255,6 +255,27 @@ void streak_check_missed_day(void) {
              y, m, d);
     streak_data.streak = 0;
     save_with_wal_for_user(s_loaded_user);
+}
+
+void streak_freeze_day(void) {
+    if (s_loaded_user < 0) return;
+
+    time_t now = time(NULL);
+    if (now < 1700000000) return;  /* NTP not yet synced */
+
+    struct tm t;
+    localtime_r(&now, &t);
+    int y = t.tm_year + 1900, m = t.tm_mon + 1, d = t.tm_mday;
+
+    /* Already up-to-date — avoid redundant NVS write */
+    if (streak_data.last_year == y && streak_data.last_month == m && streak_data.last_day == d)
+        return;
+
+    streak_data.last_year  = y;
+    streak_data.last_month = m;
+    streak_data.last_day   = d;
+    save_with_wal_for_user(s_loaded_user);
+    ESP_LOGI(TAG, "No tasks today — streak frozen at %" PRId32, streak_data.streak);
 }
 
 void streak_mark_day_complete(int day_offset) {

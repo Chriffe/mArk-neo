@@ -123,6 +123,8 @@ static void calendar_refresh_task(void *arg) {
             calendar_fetch();  /* network fetch — no lock, UI remains responsive */
             if (lvgl_port_lock(1000)) {
                 calendar_apply_staged();
+                if (cal_task_count == 0) streak_freeze_day();
+                else streak_check_missed_day();
                 ui_refresh_all();
                 lvgl_port_unlock();
             }
@@ -138,6 +140,8 @@ static void calendar_refresh_task(void *arg) {
             calendar_fetch();
             if (lvgl_port_lock(1000)) {
                 calendar_apply_staged();
+                if (cal_task_count == 0) streak_freeze_day();
+                else streak_check_missed_day();
                 ui_refresh_all();
                 lvgl_port_unlock();
             }

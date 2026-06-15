@@ -54,7 +54,15 @@ void streak_shift_down(int removed_idx, int new_count);
 
 /**
  * Check if the active user missed a day and reset their streak to 0 if so.
- * Called automatically by streak_set_active_user(); also call when a date
- * change is detected at midnight without a user switch.
+ * Call after every calendar fetch (when cal_task_count > 0) and on midnight
+ * rollover. Safe to call multiple times — no-ops if streak is already 0.
  */
 void streak_check_missed_day(void);
+
+/**
+ * Advance last_day to today without changing the streak counter.
+ * Call after a calendar fetch when cal_task_count == 0 so that task-free
+ * days don't cause streak_check_missed_day() to see a gap and reset.
+ * Only writes to NVS once per calendar day.
+ */
+void streak_freeze_day(void);
